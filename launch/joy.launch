@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+
+
+<launch>
+
+
+	<!-- Smoother Node node -->
+	<node name="joySmoother" pkg="slam_robot" type="joySmoother.py"/>
+
+
+	<!-- Controller node -->
+	<node name="joyController" pkg="slam_robot" type="joyController.py"/> 
+
+
+</launch>

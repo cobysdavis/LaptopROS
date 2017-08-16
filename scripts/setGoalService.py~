@@ -1,0 +1,17 @@
+#!/usr/bin/env python
+
+import rospy
+
+from robot.srv import SetGoal,SetGoalResponse
+
+def goTo(goal):
+	return SetGoalResponse("going to the place")
+
+rospy.init_node('setGoal')
+
+service=rospy.Service('goal',SetGoal,goTo)
+print "node starting to spin"
+
+rospy.spin()
+
+

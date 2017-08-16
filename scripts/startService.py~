@@ -1,0 +1,28 @@
+#!/usr/bin/env python
+
+import rospy
+from robot.srv import StartUp,StartUpResponse
+from robot.msg import ReactiveRobotState
+
+def wakeUp(command):
+
+	state=ReactiveRobotState()
+	state.header.seq=2
+	state.header.stamp=rospy.get_rostime()
+	state.header.frame_id="dont know"
+	state.goal.x=0
+	state.goal.y=0
+	state.goal.theta=0
+	state.pose.x=0
+	state.pose.y=0
+	state.pose.theta=0
+	state.state="started up"+command
+	return StartUpResponse(state)
+
+rospy.init_node('startService')
+
+service=rospy.Service('wakeUpService',StartUp,wakeUp)
+
+rospy.spin()
+
+

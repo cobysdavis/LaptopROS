@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+
+
+<launch>
+
+	<!-- Wrapper node -->
+	<node name="ReactiveWrapper" pkg="slam_robot" type="ReactiveWrapper.py"/> 
+
+
+	<!-- Path Node node -->
+	<node name="RobotPath" pkg="slam_robot" type="RobotPath.py"/>
+
+
+	<!-- Timer node -->
+	<node name="Timer" pkg="slam_robot" type="Timer.py"/> 
+
+
+</launch>

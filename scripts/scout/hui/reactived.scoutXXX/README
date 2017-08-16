@@ -1,0 +1,8 @@
+This is the 'revived' scout reactive subsystem. This is designed to run
+on the new lenovo brains.
+
+It uses v4l2 as the video system
+
+It uses /dev/video0 as the video source
+
+September 2010

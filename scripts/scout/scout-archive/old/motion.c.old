@@ -1,0 +1,709 @@
+/* 
+ * July 12, 1995 - remove a lot of dead code
+ *    - moved avoid behaviour to escape behaviour
+ *    - new avoid behaviour based on sectors
+ *
+ *  Matt Robinson
+ */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+#include "floyd.h"
+#include "events.h"
+#include <reactcom.h>
+
+#define sign(x) ((x)<0?-1:1)
+#define MAXINFRARED (0.35+ROBOT_RADIUS)
+
+#define MIN(x,y) ((x)<(y)?(x):(y))
+#define MAX(x,y) ((x)>(y)?(x):(y))
+
+float defaultRotAccel = 50.0;
+float defaultTransAccel = 0.2;
+float defaultRotVel = 15.0;  /* degrees per second */
+float defaultTransVel = 0.15; /* 10 cm per sec */
+float maxRotVel = 45.0;  /* degrees per second */
+float maxTransVel = 0.50; /* metres per sec */
+float minTransVel = 0.03; /* slowest we want the robot to go */
+
+#define sqr(x) ((x)*(x))
+
+int escape_blocked = 0;
+int avoid_blocked = 0;
+
+/* For now, we never want to force a blocked response from
+ * this end of control
+ */
+#define force_blocked_response (0 && (escape_blocked || avoid_blocked)) 
+
+void setSafetyRadiusPattern( int pattern )
+{
+}
+
+float turnFactor( float dtheta )
+{
+	dtheta = fabs(dtheta);
+	
+	if ( dtheta > 90.0 ) /* more than 90 */
+		return 1.0;
+	else if ( dtheta > 60.0 )
+		return 0.7;
+	else if ( dtheta > 30.0 )
+		return 0.5;
+	else
+		return 0.1; /* used to be 1/20th of max */
+}
+
+float moveFactor( float dist, float max )
+{
+	float factor;
+	float speed;
+
+	dist = fabs(dist);
+	
+	if ( max < 0.1 )
+	{
+		if ( dist > 1.0 )
+			factor = 1.0;
+		else 
+			factor = 0.5;
+	}
+	else
+	{
+		if ( dist > 2.0 ) /* more than 2 metres */
+		        factor = 1.0; /* 1.0 was scary */
+		else if ( dist > 1.5 )
+		        factor = 0.75;
+		else if ( dist > 1.0 )
+		        factor = 0.5;
+		else if ( dist > 0.5 )
+		        factor = 0.25;
+		else
+		        factor = 0.1; /* uese to be 0.05 */
+	}
+	speed = fabs(max*factor);
+	if ( speed < minTransVel )
+		speed = minTransVel;
+	speed *= (max < 0.0 ? -1.0 : 1.0);
+
+	return speed;
+}
+
+int Blocked(int sensor1,int sensor2,float distance,float *closest)
+{
+    int i;
+    int max;
+    int result = 0;
+
+    if ( sensor2 >= sensor1 )
+	max = sensor2;
+    else
+	max = sensor2 + SONAR_COUNT;
+    for (i=sensor1; i <= max; i++)
+    {
+        if (sonarData[i%SONAR_COUNT] < distance)
+	{
+	    if ( closest && result == 0 )
+		*closest = sonarData[i%SONAR_COUNT];
+	    else if ( closest && sonarData[i%SONAR_COUNT] < *closest )
+		*closest = sonarData[i%SONAR_COUNT];
+	    result = 1;
+	}
+        if (infraredData[i%INFRARED_COUNT] < distance
+	    && (infraredData[i%INFRARED_COUNT] < MAXINFRARED))
+	{
+	    if ( closest && result == 0 )
+		*closest = infraredData[i%SONAR_COUNT];
+	    else if ( closest && infraredData[i%SONAR_COUNT] < *closest )
+		*closest = infraredData[i%SONAR_COUNT];
+	    result = 1;
+	}
+	if (bumperStatus)
+	    result = 1;
+    }
+    return result;
+}
+
+static float normAngle( float deg )
+{
+	/* deg is within a small number of 2pi from 0 */
+	deg = fmod(deg,360.0);
+	if ( deg < 0.0 )
+		deg += 360.0;
+	if ( deg > 180.0 )
+		deg -= 360.0;
+	return(deg);
+}
+
+#define degToRad(x) ((x)*M_PI/180.0)
+#define radToDeg(x) ((x)*180.0/M_PI)
+
+BEHAVIOUR(freeze)
+    CMDRELEASE
+    allowLowAccess = 0; /* turn off low-level access */
+    BMSG("FREEZE BEHAVIOUR INACTIVE")
+    CHECKTRIGGER(20)
+    BMSG("FREEZE BEHAVIOUR ACTIVATED")
+    CMDHALT(defaultRotAccel,defaultTransAccel)
+    allowLowAccess = 1; /* turn on low-level access */
+    REQUEUE(20)
+ENDBEHAVIOUR
+
+/* 
+ * the new avoid behaviour, based on sectors
+ */
+#define NUM_SECTORS 6
+#define AVOID_RADIUS 0.6 /* 0.6 */
+#define AVOID_ANGLE_EPSILON 4
+
+/*
+ * sectors are laid out as follows:
+ *
+ *   \ 0 /
+ * 1  \ /  5      /|\
+ * ---------       |
+ * 2  / \  4       |
+ *   / 3 \      forward
+ *
+ * a sector is _blocked_ if:
+ *   - a sonar hit less than AVOID_RADIUS is sensed 
+ *  
+ */
+void UpdateSectors( int *sectors )
+{
+    /* there are 16 sonars, distributed as follows:
+     * 0 - 1,0,15
+     * 1 - 2,3,4
+     * 2 - 4,5,6
+     * 3 - 7,8,9
+     * 4 - 10,11,12
+     * 5 - 12,13,14
+     */
+
+    static int sensor_start[NUM_SECTORS] = {
+	15, 2, 4, 7, 10, 12
+    };
+    static int sensor_end[NUM_SECTORS] = {
+	1,  4, 6, 9, 12, 14
+    };
+
+/*
+    static int sensor_start[NUM_SECTORS] = {
+	14,  0,  4,  6,  8, 12
+    };
+    static int sensor_end[NUM_SECTORS] = {
+	 2,  4,  8, 10, 12,  0
+    };
+*/
+
+    int i;
+
+    for( i = 0; i < NUM_SECTORS; i++ )
+	sectors[i] = Blocked(sensor_start[i],sensor_end[i],AVOID_RADIUS,NULL);
+}
+
+#define SECTOR_WIDTH (360.0/(NUM_SECTORS))
+int SectorOfGoal( void )
+{
+    float currTheta, desTheta, dx, dy, dt;
+
+    dx = FloydStatus.goal.x - FloydStatus.pose.x;
+    dy = FloydStatus.goal.y - FloydStatus.pose.y;
+    if ( dx*dx + dy*dy < ROBOT_RADIUS )
+	/* i.e. if we're just too close */
+	return -1; /* as a default */
+    currTheta = FloydStatus.pose.t;
+    desTheta = radToDeg(atan2(dy,dx));
+    dt = normAngle(desTheta - currTheta + SECTOR_WIDTH/2.0);
+    if ( dt < 0.0 )
+	dt += 360.0;
+    return (int) floor(dt/SECTOR_WIDTH);
+}
+
+float AngleOfSector( int sector )
+{
+    return normAngle(FloydStatus.pose.t + SECTOR_WIDTH*sector);
+}
+
+int SectorOfAngle( float angle )
+{
+	angle = normAngle(angle+(SECTOR_WIDTH/2.0)-FloydStatus.pose.t);
+	if ( angle < 0.0 )
+		angle += 360.0;
+	return (int) floor(angle/SECTOR_WIDTH);
+}
+
+int FindBestSector( int *sectors, int goal_sector )
+{
+    /* this is a little different - rates every empty sector
+     * and then chooses the "best" one
+     * a higher rating is better (no preset scale though)
+     */
+    static float ratings[NUM_SECTORS];
+    float goal_rating, pos_rating;
+    int i, best;
+
+    /* rate all of the sectors */
+    for( i = 0; i < NUM_SECTORS; i++ )
+    {
+	if ( sectors[i] )
+	    ratings[i] = -1.0; /* this is blocked */
+	else
+	{
+	    /* how "good" is this sector? */
+	    /* is it close to the goal sector? */
+	    goal_rating = abs(i-goal_sector)%NUM_SECTORS;
+	    if ( goal_rating > 3 )
+		goal_rating = NUM_SECTORS-goal_rating;
+	    goal_rating = 1.0 - goal_rating/3.0;
+	    /* is it close to our current position? */
+	    if ( i > 3 )
+		pos_rating = 1.0 - (NUM_SECTORS-i)/3.0;
+	    else
+		pos_rating = 1.0 - i/3.0;
+	    ratings[i] = pos_rating*goal_rating;
+	}
+    }
+
+    /* now find the best */
+    best = 0;
+    for( i = 1; i < NUM_SECTORS; i++ )
+	if ( ratings[i] > ratings[best] )
+	    best = i;
+    if ( ratings[best] < 0.0 )
+	return -1; /* couldn't find an empty sector */
+    else
+	return best; /* this is the best there is */
+}
+
+int FindEmptySector( int *sectors, int goal_sector )
+{
+	int i;
+
+	for( i = 0; i < NUM_SECTORS/2; i++ )
+	{
+		if ( rand()%2 && 0 )
+		{
+			if ( !sectors[(goal_sector+i)%NUM_SECTORS] )
+				return (goal_sector+i)%NUM_SECTORS;
+			if ( !sectors[(goal_sector-i+NUM_SECTORS)
+			              %NUM_SECTORS] )
+				return (goal_sector-i+NUM_SECTORS)
+					%NUM_SECTORS;
+		}
+		else
+		{
+			if ( !sectors[(goal_sector-i+NUM_SECTORS)
+			              %NUM_SECTORS] )
+				return (goal_sector-i+NUM_SECTORS)
+					%NUM_SECTORS;
+			if ( !sectors[(goal_sector+i)%NUM_SECTORS] )
+				return (goal_sector+i)%NUM_SECTORS;
+		}
+	}
+	return -1; /* couldn't find anything */
+}
+
+static void DumpSectors( int *sectors )
+{
+	int i;
+	FILE *f;
+
+	return;
+
+	f = fopen( "sector.log", "a" );
+	if ( !f )
+	{
+		fprintf( stderr, "Log open failed\n" );
+	}
+
+	if ( f )
+		fprintf( f, "Sectors:\n" );
+	fprintf( stderr, "Sectors:\n" );
+	for( i = 0; i < NUM_SECTORS; i++ )
+	{
+		if ( f )
+		    fprintf( f, "[%d]  %d\n", i, sectors[i] );
+		fprintf( stderr, "[%d]  %d\n", i, sectors[i] );
+	}
+	if ( f )
+		fclose(f);
+}
+
+static void DumpMessage( char *msg )
+{
+	FILE *f;
+
+	return;
+
+	if ( !(f = fopen("sector.log","a")))
+	{
+		fprintf( stderr, "Log open failed\n" );
+	}
+	if ( f )
+		fprintf( f, "%s\n", msg );
+	fprintf( stderr, "%s\n", msg );
+	if ( f )
+		fclose(f);
+}
+
+#define TESTLOC(value,loc,res) ((value)==(loc)?(res):' ')
+int sector[NUM_SECTORS];
+
+int *GetSectorPtr( void )
+{
+    return sector;
+}
+
+BEHAVIOUR(avoid)
+
+    static float dest_angle;
+    int dest_sector, goal_sector,best_sector;
+    static char msg[256];
+
+    FSM
+	ADDSTATE(ok)
+	ADDSTATE(turning)
+	ADDSTATE(moving)
+    BEGINFSM(ok)
+
+    STATE(ok)
+        avoid_blocked = 0;
+	UpdateSectors(sector);
+	goal_sector = SectorOfGoal();
+	if ( goal_sector < 0 || !sector[goal_sector] )
+	{
+		CMDRELEASE
+		REQUEUE(5)
+	}
+	else
+	{
+	        dest_sector = FindBestSector(sector,goal_sector);
+		if ( dest_sector < 0 )
+		{
+			/* this is somebody else's problem */
+                        avoid_blocked = 1;
+			CMDRELEASE
+			REQUEUE(5)
+		}
+		else if ( dest_sector == 0 )
+		{
+			/* move forward now */
+			CMDMOVE(defaultTransAccel,maxTransVel)
+			SETSTATE(moving,5)
+		}
+		else
+		{
+		        dest_angle = AngleOfSector(dest_sector);
+			CMDTURN(defaultRotAccel,maxRotVel,dest_angle)
+			SETSTATE(turning,5)
+		}
+	}
+    ENDSTATE
+
+    STATE(turning)
+	UpdateSectors(sector);
+	goal_sector = SectorOfGoal();
+	dest_sector = SectorOfAngle(dest_angle);
+	if ( goal_sector < 0 ) /* don't check for clear goal - 
+	                          just too close */
+	{
+		/* goal is clear */
+		CMDRELEASE
+		SETSTATE(ok,5)
+	}
+	else
+	{
+		if ( fabs(normAngle(FloydStatus.pose.t-dest_angle)) < 
+			AVOID_ANGLE_EPSILON )
+		{
+			/* start moving */
+			CMDMOVE(defaultTransAccel,maxTransVel)
+			SETSTATE(moving,5)
+		}
+		else
+		{
+			/* keep turning */
+			CMDTURN(defaultRotAccel,maxRotVel,dest_angle)
+			REQUEUE(5)
+		}
+	}
+    ENDSTATE
+
+    STATE(moving)
+	UpdateSectors(sector);
+	goal_sector = SectorOfGoal();
+	dest_sector = SectorOfAngle(dest_angle);
+	if ( goal_sector < 0 || !sector[goal_sector] )
+	{
+		/* goal is clear */
+		CMDRELEASE
+		SETSTATE(ok,5)
+	}
+	else if ( sector[dest_sector] )
+	{
+		/* current choice is blocked */
+		/* halt and let avoid system restart */
+		CMDHALT(defaultRotAccel,defaultTransAccel)
+		SETSTATE(ok,5)
+	}
+	else
+	{
+	        best_sector = FindBestSector(sector,goal_sector);
+		if ( best_sector != dest_sector )
+		{
+		    /* restart - there's a better option! */
+		    CMDHALT(defaultRotAccel,defaultTransAccel)
+		    SETSTATE(ok,5)
+		}
+		else
+		{
+		    /* keep going - this is still the best choice */
+		    CMDMOVE(defaultTransAccel,maxTransVel)
+		    REQUEUE(5)
+		}
+	}
+    ENDSTATE
+    ENDFSM
+ENDBEHAVIOUR
+
+/*
+ * the escape behaviour is triggered when things just get too
+ * close
+ */
+
+/*
+ * FIX:  due to the fact that turning is now absolute
+ * (i.e. turn to face this heading) I've had to break
+ * the escape behaviour down into two states, otherwise
+ * it's continually starting and stopping on its rotational
+ * axis.
+ *
+ * The downside of this is that occasionally, when the freeze is 
+ * removed, the robot may make a sudden (apparently pointless) turn.
+ * Although this is unnecessary, it should put the robot in any harm.
+ *
+ * Also forgot to note:  turned a couple of "backup" cases into
+ * "turn" cases.  Moving sideways is generally more conducive to
+ * eventually getting around an obstacle than simply backing up.
+ *
+ */
+
+BEHAVIOUR(escape)
+	int blockfore, blockaft, blockleft, blockright;
+
+        /* just keep an eye out for obstacles */
+	blockfore = Blocked(13,3,R_MIN,NULL) << 3;
+	blockaft = Blocked(6,10,R_MIN,NULL) << 2;
+	blockleft = Blocked(2,6,R_MIN,NULL) << 1;
+	blockright = Blocked(10,13,R_MIN,NULL);
+        escape_blocked = 0; /* by default */
+
+	switch(blockfore|blockaft|blockleft|blockright){
+	case 0: /* clear sailing */
+		BMSG("Everything is clear sailing.      ")
+		CMDRELEASE
+		break;
+	case 1: /* blockright */
+	case 13:/* blockfore|blockaft|blockright */
+	case 9: /* blockfore|blockright */
+		/* turn left 45 deg. and check again */
+		BMSG("Turning left to avoid obstacle.   ")
+	        CMDTURNVEL(defaultRotAccel, defaultRotVel)
+                break;
+	case 2: /* blockleft */
+	case 12:/* blockfore|blockaft */
+	case 14:/* blockfore|blockaft|blockleft */
+	case 10:/* blockfore|blockleft */
+		BMSG("Turning right to avoid obstacle.      ")
+		CMDTURNVEL(defaultRotAccel, defaultRotVel)
+		break;
+	case 3: /* blockright|blockleft */
+		BMSG("Moving forward to avoid obstacle (3). ")
+		CMDMOVE(defaultTransAccel, defaultTransVel*0.30)
+		break;
+	case 4: /* blockaft */
+		BMSG("Moving forward to avoid obstacle (4). ")
+		CMDMOVE(defaultTransAccel, defaultTransVel*0.30)
+		break;
+	case 5: /* blockaft|blockright */
+		BMSG("Moving forward to avoid obstacle (5). ")
+		CMDMOVE(defaultTransAccel, defaultTransVel*0.30)
+		break;
+	case 6: /* blockaft|blockleft */
+		BMSG("Moving forward to avoid obstacle (6). ")
+		CMDMOVE(defaultTransAccel, defaultTransVel*0.30)
+		break;
+	case 7: /* blockaft|blockleft|blockright */
+		BMSG("Moving forward to avoid obstacle (7). ")
+		CMDMOVE(defaultTransAccel, defaultTransVel*0.30)
+		break;
+	case 8: /* blockfore */
+	case 11:/* blockfore|blockleft|blockright */
+		BMSG("Moving backward to avoid obstacle.")
+		CMDMOVE(defaultTransAccel, -defaultTransVel*0.30)
+		break;
+	case 15:/* blockfore|blockaft|blockleft|blockright */
+		escape_blocked = 1;
+		BMSG("Completely blocked in!.           ")
+		CMDHALT(defaultTransAccel, defaultRotAccel)
+		break;
+	default:/* can't happen */
+		BMSG("Invalid state in avoid.        ")
+		CMDHALT(defaultTransAccel, defaultRotAccel)
+	}
+	REQUEUE(2)
+ENDBEHAVIOUR
+
+/*
+ * new 'normal' goal-seeking behaviour 
+ */
+BEHAVIOUR(normal)
+
+	float currTheta;
+	float desTheta;
+	float dist,dx,dy,dt;
+	int i;
+	static char message[80];
+	static float posEpsilon = 0.15; /* within 15 cm */
+	static float angEpsilon = 10.0;  /* within 10 degrees */
+
+	/* timing info */
+	static int num_delays = 5;
+	static float delays[5];
+	static int which = 0;
+	static int rateTimeInit = 0; /* haven't received anything yet */
+	static clockType lastTimeStamp = (clockType)0;
+	static float currentRate = 0.0; /* current rate */
+	clockType clk;
+
+	FSM
+	ADDSTATE(goal)
+	ADDSTATE(driving)
+	BEGINFSM(goal)
+
+	/* regardless of the state, we want to check the clock
+	 */
+
+	STATE(goal)
+	/* determine if we are at the goal */
+
+        /* check for forced block (don't do anything!) */
+        if ( force_blocked_response )
+        {
+	    FloydStatus.status = RCT_BLOCKED;
+	    REQUEUE(5)
+	}
+
+ 	/* check clock */
+	if ( !rateTimeInit )
+	{
+		rateTimeInit = 1;
+		lastTimeStamp = clockTicks();
+	}
+	else
+	{
+		clk = clockTicks();
+		delays[which] = ticksToSec(clk-lastTimeStamp);
+		lastTimeStamp = clk;
+		which = (which+1)%num_delays;
+		currentRate = 0.0;
+		for( i = 0; i < num_delays; i++ )
+			currentRate += delays[i];
+		currentRate /= num_delays;
+	}
+
+	dx = FloydStatus.goal.x - FloydStatus.pose.x;
+	dy = FloydStatus.goal.y - FloydStatus.pose.y;
+	dt = normAngle(FloydStatus.goal.t - FloydStatus.pose.t);
+	dist = fabs(sqrt(dx*dx+dy*dy));
+	if ((dist < posEpsilon) && (fabs(dt) < angEpsilon)){
+		FloydStatus.status = RCT_GOAL;
+		CMDHALT(defaultTransAccel, defaultRotAccel)
+		sprintf( message, "At goal   (halted) \t Rate: %1.5f   \n",
+				currentRate );
+		BMSG( message )
+		SETSTATE(goal, 5)
+	} else {
+		FloydStatus.status = RCT_MOVING;
+
+		/* are we close enough? */
+		if ( dist < posEpsilon ) {
+			/* rotate to goal pose */
+			sprintf( message, "At goal - rotating to pose \t "
+				"Rate: %1.5f   \n",
+				currentRate );
+			BMSG( message )
+			CMDTURN(defaultRotAccel,maxRotVel,FloydStatus.goal.t)
+			SETSTATE(goal, 5)
+		} else {
+			/* turn towards goal location */
+			desTheta = normAngle(radToDeg(atan2(dy,dx)));
+			BMSG( "turning towards the goal" )
+			CMDTURN(defaultRotAccel,maxRotVel,desTheta)
+			SETSTATE(driving, 5)
+		}
+	}
+	ENDSTATE
+
+	STATE(driving)
+
+        if ( force_blocked_response )
+        {
+	    FloydStatus.status = RCT_BLOCKED;
+	    REQUEUE(5)
+	}
+
+	/* check clock */
+	if ( !rateTimeInit )
+	{
+		rateTimeInit = 1;
+		lastTimeStamp = clockTicks();
+	}
+	else
+	{
+		clk = clockTicks();
+		delays[which] = ticksToSec(clk-lastTimeStamp);
+		lastTimeStamp = clk;
+		which = (which+1)%num_delays;
+		currentRate = 0.0;
+		for( i = 0; i < num_delays; i++ )
+			currentRate += delays[i];
+		currentRate /= num_delays;
+	}
+
+	dx = FloydStatus.goal.x - FloydStatus.pose.x;
+	dy = FloydStatus.goal.y - FloydStatus.pose.y;
+	dt = normAngle(FloydStatus.goal.t - FloydStatus.pose.t);
+	dist = fabs(sqrt(dx*dx+dy*dy));
+
+	if(dist < posEpsilon){ /* we've gotten there */
+		CMDHALT(defaultTransAccel, defaultRotAccel)
+		sprintf( message, "Arrived at goal (x,y) position \t "
+			"Rate: %1.5f   ", currentRate );
+		BMSG(message)
+		SETSTATE(goal, 5)
+	} else {
+		currTheta = normAngle(FloydStatus.pose.t);
+		desTheta = normAngle(radToDeg(atan2(dy,dx)));
+		dt = normAngle(desTheta - currTheta);
+		if(fabs(dt) > angEpsilon){ /* must turn some more */
+			sprintf( message, "Still turning towards goal position \t "
+				"Rate: %1.5f   ", currentRate );
+			BMSG(message)
+			CMDTURN(defaultRotAccel,maxRotVel,desTheta)
+			SETSTATE(driving, 5)
+		} else { /* drive towards goal */
+			sprintf( message, "Driving to goal         \t ",
+				"Rate: %1.5f   ", currentRate );
+			BMSG(message)
+			CMDMOVE(defaultTransAccel,
+				moveFactor(dist,maxTransVel))
+			SETSTATE(driving, 5)
+		}
+	}
+	ENDSTATE
+	ENDFSM
+ENDBEHAVIOUR
+

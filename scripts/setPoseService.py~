@@ -1,0 +1,17 @@
+#!/usr/bin/env python
+
+import rospy
+
+from robot.srv import SetPose,SetPoseResponse
+
+def setLoc(place):
+	return SetGoalResponse("I am at the place")
+
+rospy.init_node('setPose')
+
+service=rospy.Service('position',SetPose,setLoc)
+print "node starting to spin"
+
+rospy.spin()
+
+

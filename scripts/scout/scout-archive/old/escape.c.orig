@@ -1,0 +1,60 @@
+# include <stdio.h>
+# include <sys/fcntl.h>
+# include <sys/types.h>
+# include <sys/socket.h>
+# include <netinet/in.h>
+# include <sys/mman.h>
+# include <sys/time.h>
+# include <unistd.h>
+# include <math.h>
+# include "ioctl_meteor.h"
+# include "Nclient.h"
+
+# include "scout.h"
+
+# include "escape.h"
+
+
+/* Escape Behaviour. Try to escape from something nearby */
+# define ESCAPED 0.20 /* minimum distance (in m) we will permit */
+int escapeBehaviour(float *sonars, long bumper, float *escapeT, float *escapeD)
+{
+  int i, blocked = 0, unblocked = -1;
+  float t;
+
+  for(i=0;i<15;i++){
+    if((sonars[i] < ESCAPED) && (sonars[(i+1)%16] < ESCAPED) &&
+       (sonars[(i+15)%16] < ESCAPED))
+      blocked = 1;
+    if((unblocked < 0) && (sonars[i] > ESCAPED) &&
+       (sonars[(i+1)%16] > ESCAPED) && (sonars[(i+15)%16] > ESCAPED))
+       unblocked = i;
+  }
+
+  if(blocked){
+    for(i=0;i<15;i++)
+      fprintf(stderr,"%4.2f ",sonars[i]);
+    fprintf(stderr,"\n");
+    fprintf(stderr,"escaped %d!\n", unblocked);
+
+    /* can we get out? */
+    if(unblocked < 0)
+      return(0);
+
+    /* should we turn to best direction to run in? */
+    if(unblocked != 0){
+      *escapeD = 0.0;
+      t = 360.0 * unblocked / 16.0;
+      if(t > 180.0)
+	t = t - 360.0;
+      *escapeT = t;
+      return(1);
+    }
+
+    /* run straight */
+    *escapeD = ESCAPED;
+    *escapeT = 0.0;
+    return(1);
+  }
+  return(0);
+}

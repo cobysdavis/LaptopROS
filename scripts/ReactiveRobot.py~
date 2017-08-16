@@ -1,0 +1,155 @@
+import socket
+import sys
+import struct
+from RobotPose import *
+
+#deleted all camera stuff
+
+class ReactiveRobot:
+  "Encapsulation of a reactive robot"
+  
+  def __init__(self, host = "robotworld.cse.yorku.ca", port = 20000):
+    self._header = b'\x12\x34\x56\x78'
+    try:
+      self._theSocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+      self._theSocket.connect((host, port))
+    except socket.error:
+      print "Unable to connect to robot " + host + " at port " + str(port)
+      self._theSocket = None
+    self.RCT_MOVING = 0
+    self.RCT_GOAL = 1
+    self.RCT_BLOCKED = 2
+    self.imageWidth = 640
+    self.imageHeight = 480
+    self.blockFactor = 48
+    self.msgSize = 56
+
+  def isAlive(self) :
+    "Return True iff the robot is alive"
+    return self._theSocket != None
+
+  def startup(self) :
+    print "Startup the robot"
+    if not self.isAlive() :
+      return False
+    try:
+      msg = self._header + b'\x00\x04' + self.zeros(50)
+      self._theSocket.sendall(msg)
+      resp = self._theSocket.recv(self.msgSize, socket.MSG_WAITALL)
+      print "response length: "+ str(len(resp))
+      return (len(resp) == self.msgSize) and (resp[7] == b'\x01')
+    except socket.error:
+      print "Unable to startup the robot"
+      return False
+
+  def disconnect(self) :
+    self._theSocket.close()
+
+  def shutdown(self) :
+    "Shut the robot down"
+    if not self.isAlive() :
+      return False
+    try:
+      msg = self._header + b'\x00\x05' + self.zeros(74)
+      self._theSocket.sendall(msg)
+      resp = self._theSocket.recv(80, socket.MSG_WAITALL)+self.zeros(24)
+      print len(resp)
+      if (len(resp) != 80) or (resp[7] != b'\x01'):
+        print "shutdown did not ACK"
+      return True
+    except socket.error:
+      print "Unable to shut the robot down"
+      return False
+
+  def setPose(self, r) :
+    "Set the robot pose"
+    if not self.isAlive() :
+      return False
+    try:
+      msg = self._header + b'\x00\x06' + self.floatToBytes(r.x) + self.floatToBytes(r.y) + self.floatToBytes(r.t) + self.zeros(38)
+      self._theSocket.sendall(msg)
+      resp = self._theSocket.recv(56, socket.MSG_WAITALL)
+      if (len(resp) != 56) or (resp[7] != b'\x01'):
+        print "setPose did not ACK"
+        return False
+      return True
+    except socket.error:
+      print "Unable to set the robot's pose"
+      return False
+
+  def setGoal(self, r) :
+    "Set the robot goal"
+    print "Setting the goal to " + str(r)
+    if not self.isAlive() :
+      return False
+    try:
+      msg = self._header + b'\x00\x07' + self.zeros(14) + self.floatToBytes(r.x) + self.floatToBytes(r.y) + self.floatToBytes(r.t) + self.zeros(24)
+      self._theSocket.sendall(msg)
+      resp = self._theSocket.recv(56, socket.MSG_WAITALL)
+      if (len(resp) != 56) or (resp[7] != b'\x01'):
+        print "setGoal did not ACK"
+        return False
+      print "goal set to " + str(r)
+      return True
+    except socket.error:
+      print "Socket error"
+      return False
+
+  def queryPose(self) :
+    "Where is the robot?"
+    if not self.isAlive() :
+      return RobotPose(0.0, 0.0, 0.0)
+    try:
+      msg = self._header + b'\x00\x0a' + self.zeros(50)
+      self._theSocket.sendall(msg)
+      resp = self._theSocket.recv(56, socket.MSG_WAITALL)
+      if (len(resp) != 56) or (resp[7] != b'\x01'):
+        print "queryPose did not ACK"
+        return RobotPose(0.0, 0.0, 0.0)
+      return RobotPose(self.bytesToFloat(resp, 8), self.bytesToFloat(resp, 12), self.bytesToFloat(resp, 16))
+    except socket.error:
+      print "Socket error"
+      return RobotPose(0.0, 0.0, 0.0)
+
+  def queryState(self) :
+    "What is the robot's status"
+    if not self.isAlive() :
+      return -1
+    try:
+      msg = self._header + b'\x00\x0c' + self.zeros(50)
+      self._theSocket.sendall(msg)
+      resp = self._theSocket.recv(56, socket.MSG_WAITALL)
+      if (len(resp) != 56) or (resp[7] != b'\x01'):
+        print "queryState did not ACK"
+        return -1
+      return self.bytesToInt(resp, 52)
+    except socket.error:
+      print "Socket error"
+      return -1
+
+
+  def zeros(self, n) :
+    "return a byte string of zeros of length n"
+    z = ''
+    for x in range(0,n) :
+      z = z + b'\x00'
+    return z
+
+  def floatToBytes(self, v) :
+    "convert a float into bytes (msb first)"
+    print "float to bytes called with " + str(v)
+    print "about to return " + str(struct.pack('!f',v))
+    return struct.pack('!f',v)
+
+  def bytesToFloat(self, b, offset) :
+    "convert 4 bytes in b at offset to a float"
+    return struct.unpack_from("!f", b, offset)[0]
+
+  def intToBytes(self, v) :
+    "convert an int in to bytes (msb first)"
+    return struct.pack("!i", v)
+
+  def bytesToInt(self, b, offset) :
+    "convert 4 bytes in b at offset to an int"
+    return struct.unpack_from("!i", b, offset)[0]
+
