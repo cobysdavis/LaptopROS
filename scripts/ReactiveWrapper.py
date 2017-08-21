@@ -23,7 +23,8 @@ class ReactiveWrapper:
     self._robot=ReactiveRobot(host,port)
     self.currentGoal=Pose2D(0,0,0)
     self.currentPose=Pose2D(0,0,0)
-    self.poseLogo=Pose2D(0,0,0)
+    self.posLogo=Pose2D(0,0,0)
+    self.angleLogo=Pose2D(0,0,0)
 #keeps track of the number of different goals given to the robot 
     self.goalSet=0
 #factors that control the weighting of joystick commands. these were determined through experiment
@@ -33,16 +34,14 @@ class ReactiveWrapper:
     self.seq=0	
     print ReactiveRobot(host, port)
 
-
   def isAlive(self) :
     return self._robot.isAlive()
 
   def startUp(self, args) :
-    print "Starting up the robot"
+    print "Attempting to startup the robot"
     if not self.isAlive() :
       return StartOrStopResponse("already running")
     try:
-      print "startup "
       self._robot.startup()
       alivePub.publish("Alive")
       return StartOrStopResponse("started up")
@@ -193,12 +192,15 @@ class ReactiveWrapper:
     state.state=str(self._robot.queryState())
     statePublisher.publish(state)
     return state.state
-    
-    def setPoseRelativeToLogo(self,data):
+
+  def setPoseRelativeToLogo(self,data):
       #logo defined as (0,0,0)
-      poseLogo.x=data.data[3]
-      poseLogo.y=data.data[4]
-      poseLogo.z=data.data[5]
+      angleLogo.x=data.data[0]
+      angleLogo.y=data.data[1]
+      angleLogo.z=data.data[2]
+      posLogo.x=data.data[3]
+      posLogo.y=data.data[4]
+      posLogo.z=data.data[5]
 
 if __name__ == '__main__' :
   print "ReactiveWrapper starting up"
@@ -219,8 +221,7 @@ if __name__ == '__main__' :
     matrixSubscriber=rospy.Subscriber('matrix',Float64MultiArray,wrapper.setPoseRelativeToLogo)
     velocitySubscriber=rospy.Subscriber('cmd_vel',Twist,wrapper.joyMove)
     commandSubscriber=rospy.Subscriber('CommandLoc',Pose2D,wrapper.commandMove)
-    if wrapper.isAlive()==True:
-      clockSub=rospy.Subscriber('clock',Int32,wrapper.statePub)
+    clockSub=rospy.Subscriber('clock',Int32,wrapper.statePub)
 
 #publications
     statePublisher=rospy.Publisher('RobotState',ReactiveRobotState,queue_size=10)

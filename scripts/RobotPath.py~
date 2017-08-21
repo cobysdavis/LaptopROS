@@ -30,7 +30,7 @@ class List :
 			commandPublisher.publish(self.list[self.listLoc])
 			self.listLoc+=1
 
-def listGen(list,manTheta):
+def listGen(list,manTheta==0):
 	new=[]
 	for i in range(0,len(list)):
 		point=Pose2D()

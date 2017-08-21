@@ -1,14 +1,11 @@
 #!/usr/bin/env python
-
 import math
 import rospy
 import time
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg import Joy
 
-
 def callback(data):
-
 	twist=Twist()
 	if abs(data.axes[7])==1 :
 	  if data.axes[5]>0 :
@@ -29,7 +26,6 @@ def callback(data):
 	twist.linear.z= data.buttons[1]
 	twist.angular.x= data.buttons[2]
 	twist.angular.y= data.buttons[3]
-	
 
 	if twist.linear.x==0 and twist.angular.z==0 and twist.linear.y==0 and twist.linear.z==0 and twist.angular.x==0 and twist.angular.y==0:
 	  pass

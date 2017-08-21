@@ -8,14 +8,12 @@
 		<param name="deadzone" value="0.12" />
 	</node>
 
-
-	<node name="joyController" pkg="slam_robot" type="joyController.py"/> 
-
-
-
 	<!-- Smoother Node node -->
 	<node name="joySmoother" pkg="slam_robot" type="joySmoother.py"/>
 
 
-	
+	<!-- Controller node -->
+	<node name="joyController" pkg="slam_robot" type="joyController.py"/> 
+
+
 </launch>
